@@ -216,7 +216,8 @@ class Helpers(object):
     @staticmethod
     def export_csv(df, file_name):
         """
-        Export a Pandas dataframe to file by given path and start this file's download, if applicable (run in Google
+        Export a Pandas dataframe to file by given path and start this file's download, if ps
+        licable (run in Google
         Colab)
 
         :param df: Dataframe to export
@@ -313,117 +314,13 @@ class Helpers(object):
 
         # join marks and revenue events
         merged_df = self._merge(marks_df=marks_df, attributions_df=attributions_df)
-        grouped_revenue = merged_df.groupby(by='ab_test_group')
+        grouped_revenue = merged_df.groupby(by='ab_test_group'
 
-        # init all KPIs with 0s first:
-        test_revenue_micros = 0
-        test_conversions = 0
-        test_converters = 0
-
-        control_revenue_micros = 0
-        control_conversions = 0
-        control_converters = 0
-
-        # we might not have any events for a certain group in the time-period,
-        if TEST in grouped_revenue.groups:
-            test_revenue_df = grouped_revenue.get_group(TEST)
-            test_revenue_micros = test_revenue_df['revenue_eur'].sum()
-            # test_conversions = test_revenue_df['partner_event'].count()
-            # as we filtered by revenue event and dropped the column we can just use
-            test_conversions = test_revenue_df['user_id'].count()
-            test_converters = test_revenue_df['user_id'].nunique()
-
-        if CONTROL in grouped_revenue.groups:
-            control_revenue_df = grouped_revenue.get_group(CONTROL)
-            control_revenue_micros = control_revenue_df['revenue_eur'].sum()
-            # control_conversions = control_revenue_df['partner_event'].count()
-            # as we filtered by revenue event and dropped the column we can just use
-            control_conversions = control_revenue_df['user_id'].count()
-            control_converters = control_revenue_df['user_id'].nunique()
-
-        # calculate KPIs
-        test_revenue = test_revenue_micros / 10 ** 6
-        control_revenue = control_revenue_micros / 10 ** 6
-
-        ratio = float(test_group_size) / float(control_group_size)
-        scaled_control_conversions = float(control_conversions) * ratio
-        scaled_control_revenue_micros = float(control_revenue_micros) * ratio
-        incremental_conversions = test_conversions - scaled_control_conversions
-        incremental_revenue_micros = test_revenue_micros - scaled_control_revenue_micros
-        incremental_revenue = incremental_revenue_micros / 10 ** 6
-        incremental_converters = test_converters - control_converters * ratio
-
-        # calculate the ad spend
-        ad_spend = self._calculate_ad_spend(marks_and_spend_df)
-
-        iroas = incremental_revenue / ad_spend
-        icpa = ad_spend / incremental_conversions
-        cost_per_incremental_converter = ad_spend / incremental_converters
-
-        rev_per_conversion_test = 0
-        rev_per_conversion_control = 0
-        if test_conversions > 0:
-            rev_per_conversion_test = test_revenue / test_conversions
-        if control_conversions > 0:
-            rev_per_conversion_control = control_revenue / control_conversions
-
-        test_cvr = test_conversions / test_group_size
-        control_cvr = control_conversions / control_group_size
-
-        uplift = 0
-        if control_cvr > 0:
-            uplift = test_cvr / control_cvr - 1
-
-        # calculate statistical significance
-        control_successes, test_successes = control_conversions, test_conversions
-        if self.use_converters_for_significance or max(test_cvr, control_cvr) > 1.0:
-            control_successes, test_successes = control_converters, test_converters
-        chi_df = pd.DataFrame({
-            "conversions": [control_successes, test_successes],
-            "total": [control_group_size, test_group_size]
-        }, index=['control', 'test'])
-        # CHI square calculation will fail with insufficient data
-        # Fallback to no significance
-        try:
-            chi, p, _, _ = scipy.stats.chi2_contingency(
-                pd.concat([chi_df.total - chi_df.conversions, chi_df.conversions], axis=1), correction=False)
-        except:
-            chi, p = 0, 1.0
-
-        # bonferroni correction with equal weights - if we have multiple hypothesis:
-        # https://en.wikipedia.org/wiki/Bonferroni_correction
-        significant = p < 0.05 / m_hypothesis
-
-        dataframe_dict = {
-            "ad spend": ad_spend,
-            "total revenue": test_revenue + control_revenue,
-            "test group size": test_group_size,
-            "test conversions": test_conversions,
-            "test converters": test_converters,
-            "test revenue": test_revenue,
-            "control group size": control_group_size,
-            "control conversions": control_conversions,
-            "control_converters": control_converters,
-            "control revenue": control_revenue,
-            "ratio test/control": ratio,
-            "control conversions (scaled)": scaled_control_conversions,
-            "control revenue (scaled)": scaled_control_revenue_micros / 10 ** 6,
-            "incremental conversions": incremental_conversions,
-            "incremental converters": incremental_converters,
-            "incremental revenue": incremental_revenue,
-            "rev/conversions test": rev_per_conversion_test,
-            "rev/conversions control": rev_per_conversion_control,
-            "test CVR": test_cvr,
-            "control CVR": control_cvr,
-            "CVR Uplift": uplift,
-            "iROAS": iroas,
-            "cost per incr. converter": cost_per_incremental_converter,
-            "iCPA": icpa,
-            "chi^2": chi,
-            "p-value": p,
-            "significant": significant
+             dataframe_dict = {
+            "User ID": user_id,
         }
-
+                                            
+                                            
         # show results as a dataframe
         return pd.DataFrame(
             dataframe_dict,
