@@ -314,10 +314,13 @@ class Helpers(object):
 
         # join marks and revenue events
         merged_df = self._merge(marks_df=marks_df, attributions_df=attributions_df)
-        grouped_revenue = merged_df.groupby(by='ab_test_group'
+        grouped_revenue = merged_df.groupby(by='ab_test_group')
 
-             dataframe_dict = {
-            "User ID": user_id,
+        
+        
+        dataframe_dict = {
+            "merged marks & attributions": merged_df,
+            "grouped revenue": grouped_revenue
         }
                                             
                                             
