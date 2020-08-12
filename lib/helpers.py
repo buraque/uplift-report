@@ -571,7 +571,8 @@ class _CSVHelpers(object):
         """
         df['ts'] = pd.to_datetime(df['ts'])
         df['ts'] = (df['ts'].astype('int64') / 1e9).astype('int32')
-        df['user_id'] = df['user_id'].apply(xxhash.xxh64_intdigest).astype('int64')
+        #df['user_id'] = df['user_id'].apply(xxhash.xxh64_intdigest).astype('int64')
+        df['user_id'] = df['user_id'].apply(xxhash.xxh64_intdigest).astype('str')
         if 'ab_test_group' in df.columns:
             df['ab_test_group'] = df['ab_test_group'].transform(lambda g: g == 'test')
         return df
