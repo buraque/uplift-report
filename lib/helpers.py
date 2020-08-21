@@ -7,7 +7,8 @@ import xxhash
 
 from datetime import datetime
 
-from lib.const import __version__, TEST, CONTROL, CSV_SOURCE_MARKS_AND_SPEND, CSV_SOURCE_ATTRIBUTIONS, USER_ID_LENGTH
+from lib.const import __version__, TEST, CONTROL, CSV_SOURCE_MARKS_AND_SPEND, CSV_SOURCE_ATTRIBUTIONS, USER_ID_LENGTH, \
+    GOOGLE_SHEETS_OVERVIEW_URL
 
 
 def log(*args):
@@ -54,7 +55,7 @@ class Helpers(object):
     """
 
     def __init__(self, customer, audiences, revenue_event, dates, attribution_dates=None, groups=None, per_campaign_results=False,
-                 use_converters_for_significance=False, use_deduplication=False, export_user_ids=False,
+                 use_converters_for_significance=False, use_deduplication=False, export_user_ids=True,
                  csv_helpers_kwargs=None):
         self.customer = customer
 
@@ -216,8 +217,7 @@ class Helpers(object):
     @staticmethod
     def export_csv(df, file_name):
         """
-        Export a Pandas dataframe to file by given path and start this file's download, if ps
-        licable (run in Google
+        Export a Pandas dataframe to file by given path and start this file's download, if applicable (run in Google
         Colab)
 
         :param df: Dataframe to export
@@ -240,6 +240,40 @@ class Helpers(object):
         except ImportError:
             # We are not in the colab, no need to run the download
             pass
+
+    def export_to_overview(self, report):
+        """
+        Export to Google Sheets overview
+
+        :param report: Report dataframe
+
+        :type report: pandas.DataFrame
+
+        :return: None
+        """
+        try:
+            from google.colab import auth
+        except ImportError:
+            raise RuntimeError('The notebook is not running in Google Colab, export to Google Sheets overview is '
+                               'impossible')
+
+        import gspread
+        from oauth2client.client import GoogleCredentials
+
+        auth.authenticate_user()
+        gc = gspread.authorize(GoogleCredentials.get_application_default())
+        worksheet = gc.open_by_url(GOOGLE_SHEETS_OVERVIEW_URL).sheet1
+        row = self._overview_row(report['total'])
+        worksheet.append_row(row)
+
+    def _overview_row(self, total):
+        return list([
+            self.customer,
+            ",".join(self.audiences),
+            self.dates[0].strftime('%Y-%m-%d'),
+            self.dates[-1].strftime('%Y-%m-%d'),
+            __version__,
+        ]) + list(total.values)
 
     @staticmethod
     def _extract_revenue_events(df, revenue_event):
@@ -282,7 +316,6 @@ class Helpers(object):
         # Remove rows if the previous row has the same revenue_eur and user id and the ts are less than max_timedelta
         # apart
         filtered = sorted_values[
-            ('appsflyer_deduplicated' in sorted_values.columns and sorted_values['appsflyer_deduplicated']) |
             (sorted_values['user_id'] != sorted_values['last_user_id']) |
             (sorted_values['revenue_eur'] != sorted_values['last_revenue']) |
             ((pd.to_datetime(sorted_values['ts']) - pd.to_datetime(sorted_values['last_ts'])) > max_timedelta)]
@@ -316,14 +349,115 @@ class Helpers(object):
         merged_df = self._merge(marks_df=marks_df, attributions_df=attributions_df)
         grouped_revenue = merged_df.groupby(by='ab_test_group')
 
-        
-        
+        # init all KPIs with 0s first:
+        test_revenue_micros = 0
+        test_conversions = 0
+        test_converters = 0
+
+        control_revenue_micros = 0
+        control_conversions = 0
+        control_converters = 0
+
+        # we might not have any events for a certain group in the time-period,
+        if TEST in grouped_revenue.groups:
+            test_revenue_df = grouped_revenue.get_group(TEST)
+            test_revenue_micros = test_revenue_df['revenue_eur'].sum()
+            # test_conversions = test_revenue_df['partner_event'].count()
+            # as we filtered by revenue event and dropped the column we can just use
+            test_conversions = test_revenue_df['user_id'].count()
+            test_converters = test_revenue_df['user_id'].nunique()
+
+        if CONTROL in grouped_revenue.groups:
+            control_revenue_df = grouped_revenue.get_group(CONTROL)
+            control_revenue_micros = control_revenue_df['revenue_eur'].sum()
+            # control_conversions = control_revenue_df['partner_event'].count()
+            # as we filtered by revenue event and dropped the column we can just use
+            control_conversions = control_revenue_df['user_id'].count()
+            control_converters = control_revenue_df['user_id'].nunique()
+
+        # calculate KPIs
+        test_revenue = test_revenue_micros / 10 ** 6
+        control_revenue = control_revenue_micros / 10 ** 6
+
+        ratio = float(test_group_size) / float(control_group_size)
+        scaled_control_conversions = float(control_conversions) * ratio
+        scaled_control_revenue_micros = float(control_revenue_micros) * ratio
+        incremental_conversions = test_conversions - scaled_control_conversions
+        incremental_revenue_micros = test_revenue_micros - scaled_control_revenue_micros
+        incremental_revenue = incremental_revenue_micros / 10 ** 6
+        incremental_converters = test_converters - control_converters * ratio
+
+        # calculate the ad spend
+        ad_spend = self._calculate_ad_spend(marks_and_spend_df)
+
+        iroas = incremental_revenue / ad_spend
+        icpa = ad_spend / incremental_conversions
+        cost_per_incremental_converter = ad_spend / incremental_converters
+
+        rev_per_conversion_test = 0
+        rev_per_conversion_control = 0
+        if test_conversions > 0:
+            rev_per_conversion_test = test_revenue / test_conversions
+        if control_conversions > 0:
+            rev_per_conversion_control = control_revenue / control_conversions
+
+        test_cvr = test_conversions / test_group_size
+        control_cvr = control_conversions / control_group_size
+
+        uplift = 0
+        if control_cvr > 0:
+            uplift = test_cvr / control_cvr - 1
+
+        # calculate statistical significance
+        control_successes, test_successes = control_conversions, test_conversions
+        if self.use_converters_for_significance or max(test_cvr, control_cvr) > 1.0:
+            control_successes, test_successes = control_converters, test_converters
+        chi_df = pd.DataFrame({
+            "conversions": [control_successes, test_successes],
+            "total": [control_group_size, test_group_size]
+        }, index=['control', 'test'])
+        # CHI square calculation will fail with insufficient data
+        # Fallback to no significance
+        try:
+            chi, p, _, _ = scipy.stats.chi2_contingency(
+                pd.concat([chi_df.total - chi_df.conversions, chi_df.conversions], axis=1), correction=False)
+        except:
+            chi, p = 0, 1.0
+
+        # bonferroni correction with equal weights - if we have multiple hypothesis:
+        # https://en.wikipedia.org/wiki/Bonferroni_correction
+        significant = p < 0.05 / m_hypothesis
+
         dataframe_dict = {
-            "merged marks & attributions": merged_df,
-            "grouped revenue": grouped_revenue
+            "ad spend": ad_spend,
+            "total revenue": test_revenue + control_revenue,
+            "test group size": test_group_size,
+            "test conversions": test_conversions,
+            "test converters": test_converters,
+            "test revenue": test_revenue,
+            "control group size": control_group_size,
+            "control conversions": control_conversions,
+            "control_converters": control_converters,
+            "control revenue": control_revenue,
+            "ratio test/control": ratio,
+            "control conversions (scaled)": scaled_control_conversions,
+            "control revenue (scaled)": scaled_control_revenue_micros / 10 ** 6,
+            "incremental conversions": incremental_conversions,
+            "incremental converters": incremental_converters,
+            "incremental revenue": incremental_revenue,
+            "rev/conversions test": rev_per_conversion_test,
+            "rev/conversions control": rev_per_conversion_control,
+            "test CVR": test_cvr,
+            "control CVR": control_cvr,
+            "CVR Uplift": uplift,
+            "iROAS": iroas,
+            "cost per incr. converter": cost_per_incremental_converter,
+            "iCPA": icpa,
+            "chi^2": chi,
+            "p-value": p,
+            "significant": significant
         }
-                                            
-                                            
+
         # show results as a dataframe
         return pd.DataFrame(
             dataframe_dict,
@@ -390,8 +524,7 @@ class _CSVHelpers(object):
         self.columns = dict()
         self.columns[CSV_SOURCE_MARKS_AND_SPEND] = ['ts', 'user_id', 'ab_test_group', 'campaign_id', 'cost_eur',
                                                     'event_type']
-        self.columns[CSV_SOURCE_ATTRIBUTIONS] = ['ts', 'user_id', 'partner_event',
-                                                 'revenue_eur', 'appsflyer_deduplicated']
+        self.columns[CSV_SOURCE_ATTRIBUTIONS] = ['ts', 'user_id', 'partner_event', 'revenue_eur']
 
     def _export_user_ids(self, date, audience, test_users, control_users):
         if self.export_user_ids:
@@ -496,7 +629,7 @@ class _CSVHelpers(object):
 
         read_csv_kwargs = {'chunksize': self.chunk_size}
         if columns:
-            read_csv_kwargs['usecols'] = lambda c: c in columns
+            read_csv_kwargs['usecols'] = columns
 
         df = pd.DataFrame()
         test_users = pd.DataFrame()
@@ -572,7 +705,6 @@ class _CSVHelpers(object):
         df['ts'] = pd.to_datetime(df['ts'])
         df['ts'] = (df['ts'].astype('int64') / 1e9).astype('int32')
         #df['user_id'] = df['user_id'].apply(xxhash.xxh64_intdigest).astype('int64')
-        df['user_id'] = df['user_id'].apply(xxhash.xxh64_intdigest).astype('str')
         if 'ab_test_group' in df.columns:
             df['ab_test_group'] = df['ab_test_group'].transform(lambda g: g == 'test')
         return df
